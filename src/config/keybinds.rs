@@ -1145,6 +1145,38 @@ fn parse_range_modifiers(s: &str) -> Option<KeyModifiers> {
     saw_range.then_some(modifiers)
 }
 
+#[allow(dead_code)]
+fn parse_fkey_range_token(s: &str) -> Option<(u8, u8)> {
+    let (start_str, end_str) = s.split_once("..")?;
+    if !start_str.starts_with('f') || !end_str.starts_with('f') {
+        return None;
+    }
+    let start: u8 = start_str[1..].parse().ok()?;
+    let end: u8 = end_str[1..].parse().ok()?;
+    if start < 1 || end > 12 || start > end {
+        return None;
+    }
+    Some((start, end))
+}
+
+#[allow(dead_code)]
+fn parse_fkey_range(s: &str) -> Option<(KeyModifiers, u8, u8)> {
+    let mut modifiers = KeyModifiers::empty();
+    let mut range: Option<(u8, u8)> = None;
+    for part in s.split('+') {
+        let trimmed = part.trim();
+        if let Some((start, end)) = parse_fkey_range_token(trimmed) {
+            if range.is_some() {
+                return None;
+            }
+            range = Some((start, end));
+        } else {
+            modifiers |= parse_modifier_token(trimmed)?;
+        }
+    }
+    range.map(|(start, end)| (modifiers, start, end))
+}
+
 fn parse_modifier_combo(s: &str) -> Option<KeyModifiers> {
     let mut modifiers = KeyModifiers::empty();
     let parts: Vec<&str> = s.split('+').collect();
