@@ -865,9 +865,12 @@ fn push_indexed_binding(
     source: BindingSource,
     bindings: &mut Vec<IndexedKeybind>,
 ) {
-    if !matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9')) {
+    if !matches!(
+        binding.trigger.combo().0,
+        KeyCode::Char('1'..='9') | KeyCode::F(1..=12)
+    ) {
         let diag = format!(
-            "indexed keybinding must use 1..9: {field} = {:?}; disabling binding",
+            "indexed keybinding must use 1..9 or f1..f12: {field} = {:?}; disabling binding",
             binding.label
         );
         warn!(message = %diag, "config diagnostic");
@@ -2035,7 +2038,8 @@ switch_tab = "prefix+?"
             ))]
         );
         assert!(diagnostics.iter().any(|diag| {
-            diag.contains("indexed keybinding must use 1..9") && diag.contains("keys.switch_tab")
+            diag.contains("indexed keybinding must use 1..9 or f1..f12")
+                && diag.contains("keys.switch_tab")
         }));
         assert!(!diagnostics.iter().any(|diag| {
             diag.contains("kept keys.switch_tab") && diag.contains("disabled keys.help")
