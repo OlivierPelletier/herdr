@@ -1148,11 +1148,13 @@ fn parse_range_modifiers(s: &str) -> Option<KeyModifiers> {
 #[allow(dead_code)]
 fn parse_fkey_range_token(s: &str) -> Option<(u8, u8)> {
     let (start_str, end_str) = s.split_once("..")?;
-    if !start_str.starts_with('f') || !end_str.starts_with('f') {
+    let start_lower = start_str.to_ascii_lowercase();
+    let end_lower = end_str.to_ascii_lowercase();
+    if !start_lower.starts_with('f') || !end_lower.starts_with('f') {
         return None;
     }
-    let start: u8 = start_str[1..].parse().ok()?;
-    let end: u8 = end_str[1..].parse().ok()?;
+    let start: u8 = start_lower[1..].parse().ok()?;
+    let end: u8 = end_lower[1..].parse().ok()?;
     if start < 1 || end > 12 || start > end {
         return None;
     }
