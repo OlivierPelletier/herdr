@@ -1018,6 +1018,28 @@ fn parse_binding_string(raw: &str) -> Option<ParsedBinding> {
         (false, trimmed)
     };
 
+    if let Some((range_modifiers, f_start, f_end)) = parse_fkey_range(body) {
+        let bindings = (f_start..=f_end)
+            .map(|n| {
+                let combo = (KeyCode::F(n), range_modifiers);
+                let key_label = format_key_combo(combo);
+                ResolvedBinding {
+                    trigger: if trigger_prefix {
+                        BindingTrigger::Prefix(combo)
+                    } else {
+                        BindingTrigger::Direct(combo)
+                    },
+                    label: if trigger_prefix {
+                        format!("prefix+{key_label}")
+                    } else {
+                        key_label
+                    },
+                }
+            })
+            .collect();
+        return Some(ParsedBinding::Range(bindings));
+    }
+
     if let Some(range_modifiers) = parse_range_modifiers(body) {
         let bindings = (1..=9)
             .map(|idx| {
@@ -1145,7 +1167,6 @@ fn parse_range_modifiers(s: &str) -> Option<KeyModifiers> {
     saw_range.then_some(modifiers)
 }
 
-#[allow(dead_code)]
 fn parse_fkey_range_token(s: &str) -> Option<(u8, u8)> {
     let (start_str, end_str) = s.split_once("..")?;
     let start_lower = start_str.to_ascii_lowercase();
@@ -1161,7 +1182,6 @@ fn parse_fkey_range_token(s: &str) -> Option<(u8, u8)> {
     Some((start, end))
 }
 
-#[allow(dead_code)]
 fn parse_fkey_range(s: &str) -> Option<(KeyModifiers, u8, u8)> {
     let mut modifiers = KeyModifiers::empty();
     let mut range: Option<(u8, u8)> = None;
