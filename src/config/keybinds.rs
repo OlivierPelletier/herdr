@@ -57,14 +57,20 @@ impl BindingConfig {
             }
             match parse_binding_string(raw) {
                 Some(ParsedBinding::Single(binding)) => {
-                    if matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9')) {
+                    if matches!(
+                        binding.trigger.combo().0,
+                        KeyCode::Char('1'..='9') | KeyCode::F(1..=12)
+                    ) {
                         labels.push(binding.label);
                     }
                 }
                 Some(ParsedBinding::Range(range)) => {
                     labels.extend(range.into_iter().filter_map(|binding| {
-                        matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9'))
-                            .then_some(binding.label)
+                        matches!(
+                            binding.trigger.combo().0,
+                            KeyCode::Char('1'..='9') | KeyCode::F(1..=12)
+                        )
+                        .then_some(binding.label)
                     }));
                 }
                 None => {}
@@ -2133,6 +2139,21 @@ switch_tab = ["prefix+1..9", "prefix+f10..f12"]
             kb.switch_tab[9].trigger,
             BindingTrigger::Prefix((KeyCode::F(10), KeyModifiers::empty()))
         );
+    }
+
+    #[test]
+    fn indexed_labels_includes_fkey_range() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+switch_tab = ["prefix+1..9", "prefix+f10..f12"]
+"#,
+        )
+        .unwrap();
+        let labels = config.keys.switch_tab.indexed_labels();
+        assert_eq!(labels.len(), 12);
+        assert!(labels.contains(&"prefix+1".to_string()));
+        assert!(labels.contains(&"prefix+f12".to_string()));
     }
 
     #[test]
