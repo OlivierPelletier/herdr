@@ -255,13 +255,13 @@ pub struct IndexedKeybind {
 
 impl IndexedKeybind {
     pub fn matched_index(&self, key: TerminalKey) -> Option<usize> {
-        let KeyCode::Char(c @ '1'..='9') = key.code else {
+        if !terminal_key_matches_combo(key, self.trigger.combo()) {
             return None;
-        };
-        if terminal_key_matches_combo(key, self.trigger.combo()) {
-            Some((c as usize) - ('1' as usize))
-        } else {
-            None
+        }
+        match key.code {
+            KeyCode::Char(c @ '1'..='9') => Some((c as usize) - ('1' as usize)),
+            KeyCode::F(n @ 1..=12) => Some((n as usize) - 1),
+            _ => None,
         }
     }
 }
