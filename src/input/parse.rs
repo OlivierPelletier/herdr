@@ -210,6 +210,10 @@ fn parse_xterm_modified_special_sequence(data: &str) -> Option<TerminalKey> {
         "3" => KeyCode::Delete,
         "5" => KeyCode::PageUp,
         "6" => KeyCode::PageDown,
+        "11" => KeyCode::F(1),
+        "12" => KeyCode::F(2),
+        "13" => KeyCode::F(3),
+        "14" => KeyCode::F(4),
         "15" => KeyCode::F(5),
         "17" => KeyCode::F(6),
         "18" => KeyCode::F(7),
@@ -569,9 +573,52 @@ mod tests {
             crossterm::event::KeyEventKind::Press,
             None,
         );
-        assert_eq!(parse_terminal_key_sequence("\x1b[11;2~"), None);
-        assert_eq!(parse_terminal_key_sequence("\x1b[14;1~"), None);
-        assert_eq!(parse_terminal_key_sequence("\x1b[14;3~"), None);
+        assert_terminal_key_eq(
+            parse_terminal_key_sequence("\x1b[11;2~").expect("shift+f1 tilde form should parse"),
+            KeyCode::F(1),
+            KeyModifiers::SHIFT,
+            crossterm::event::KeyEventKind::Press,
+            None,
+        );
+        assert_terminal_key_eq(
+            parse_terminal_key_sequence("\x1b[14;1~").expect("f4 tilde form should parse"),
+            KeyCode::F(4),
+            KeyModifiers::empty(),
+            crossterm::event::KeyEventKind::Press,
+            None,
+        );
+        assert_terminal_key_eq(
+            parse_terminal_key_sequence("\x1b[14;3~").expect("alt+f4 tilde form should parse"),
+            KeyCode::F(4),
+            KeyModifiers::ALT,
+            crossterm::event::KeyEventKind::Press,
+            None,
+        );
+    }
+
+    #[test]
+    fn parse_ghostty_modified_f3_tilde_form() {
+        assert_terminal_key_eq(
+            parse_terminal_key_sequence("\x1b[13;129~").expect("f3 press should parse"),
+            KeyCode::F(3),
+            KeyModifiers::empty(),
+            crossterm::event::KeyEventKind::Press,
+            None,
+        );
+        assert_terminal_key_eq(
+            parse_terminal_key_sequence("\x1b[13;129:3~").expect("f3 release should parse"),
+            KeyCode::F(3),
+            KeyModifiers::empty(),
+            crossterm::event::KeyEventKind::Release,
+            None,
+        );
+        assert_terminal_key_eq(
+            parse_terminal_key_sequence("\x1b[13;2~").expect("shift+f3 should parse"),
+            KeyCode::F(3),
+            KeyModifiers::SHIFT,
+            crossterm::event::KeyEventKind::Press,
+            None,
+        );
     }
 
     #[test]
