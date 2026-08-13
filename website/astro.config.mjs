@@ -1,7 +1,9 @@
 import { defineConfig } from 'astro/config';
+import sitemap from '@astrojs/sitemap';
 import starlight from '@astrojs/starlight';
 
-const repoBlob = 'https://github.com/ogulcancelik/herdr/blob/master/';
+const repoBlob = 'https://github.com/herdrdev/herdr/blob/master/';
+const nonCanonicalDocsPath = /^\/(?:ja\/|zh-cn\/)?docs\/(?:preview|\d+\.\d+\.\d+)(?:\/|$)/;
 
 function rewriteHerdrLinks() {
   const docsLinks = new Map([
@@ -52,8 +54,19 @@ export default defineConfig({
   redirects: {
     '/ja': '/ja/docs/',
     '/zh-cn': '/zh-cn/docs/',
+    /* /stats/ was public and is linked from elsewhere; the numbers it carried
+       now live in the hero strip and the nav count. One key only — Astro
+       normalizes the trailing slash and treats both spellings as one route. */
+    '/stats': '/',
   },
   integrations: [
+    sitemap({
+      filter: (page) => !nonCanonicalDocsPath.test(new URL(page).pathname),
+      i18n: {
+        defaultLocale: 'root',
+        locales: { root: 'en', ja: 'ja', 'zh-cn': 'zh-CN' },
+      },
+    }),
     starlight({
       title: 'herdr',
       description: 'Terminal-native agent runtime and multiplexer.',
@@ -68,17 +81,33 @@ export default defineConfig({
         {
           icon: 'github',
           label: 'GitHub',
-          href: 'https://github.com/ogulcancelik/herdr',
+          href: 'https://github.com/herdrdev/herdr',
         },
       ],
       components: {
         Banner: './src/components/Banner.astro',
+        Head: './src/components/Head.astro',
         Header: './src/components/Header.astro',
+        Search: './src/components/Search.astro',
         Sidebar: './src/components/Sidebar.astro',
         SiteTitle: './src/components/SiteTitle.astro',
       },
       customCss: ['./src/styles/starlight.css'],
       head: [
+        // the brand display face; Starlight owns its own <head>, so the
+        // marketing pages' font link doesn't reach docs
+        { tag: 'link', attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' } },
+        {
+          tag: 'link',
+          attrs: { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: true },
+        },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'stylesheet',
+            href: 'https://fonts.googleapis.com/css2?family=Archivo:wght@600;800;900&family=Inter:wght@400;500;600&display=swap',
+          },
+        },
         {
           // First-visit locale redirect: honors browser language order, then
           // remembers the last locale the reader actually used.
@@ -111,7 +140,7 @@ export default defineConfig({
         },
         {
           tag: 'meta',
-          attrs: { property: 'og:image', content: 'https://herdr.dev/assets/og-card-v8.png' },
+          attrs: { property: 'og:image', content: 'https://herdr.dev/assets/og-card-v9.png' },
         },
         { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
         { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
@@ -119,23 +148,23 @@ export default defineConfig({
           tag: 'meta',
           attrs: {
             property: 'og:image:alt',
-            content: 'Herdr documentation — One terminal. The whole herd.',
+            content: 'Herdr documentation — run them anywhere, leave them running.',
           },
         },
         {
           tag: 'meta',
-          attrs: { name: 'twitter:image', content: 'https://herdr.dev/assets/og-card-v8.png' },
+          attrs: { name: 'twitter:image', content: 'https://herdr.dev/assets/og-card-v9.png' },
         },
         {
           tag: 'meta',
           attrs: {
             name: 'twitter:image:alt',
-            content: 'Herdr documentation — One terminal. The whole herd.',
+            content: 'Herdr documentation — run them anywhere, leave them running.',
           },
         },
       ],
       editLink: {
-        baseUrl: 'https://github.com/ogulcancelik/herdr/edit/master/',
+        baseUrl: 'https://github.com/herdrdev/herdr/edit/master/',
       },
       lastUpdated: true,
       disable404Route: true,
@@ -149,23 +178,25 @@ export default defineConfig({
             { label: 'Quick start', translations: { ja: 'クイックスタート', 'zh-CN': '快速开始' }, slug: 'docs/quick-start' },
             { label: 'Concepts', translations: { ja: 'コンセプト', 'zh-CN': '核心概念' }, slug: 'docs/concepts' },
             { label: 'Keyboard', translations: { ja: 'キーボード', 'zh-CN': '键盘' }, slug: 'docs/keyboard' },
-            { label: 'How to work with Herdr', translations: { ja: 'Herdr での作業の進め方', 'zh-CN': '使用 Herdr 的工作方式' }, slug: 'docs/how-to-work' },
           ],
         },
         {
-          label: 'Core guides',
-          translations: { ja: 'コアガイド', 'zh-CN': '核心指南' },
+          label: 'Using Herdr',
+          translations: { ja: 'Herdr を使う', 'zh-CN': '使用 Herdr' },
           items: [
+            { label: 'How to work with Herdr', translations: { ja: 'Herdr での作業の進め方', 'zh-CN': '使用 Herdr 的工作方式' }, slug: 'docs/how-to-work' },
             { label: 'Agents', translations: { ja: 'エージェント', 'zh-CN': '智能体' }, slug: 'docs/agents' },
+            { label: 'Agent automation', translations: { ja: 'エージェント自動化', 'zh-CN': '智能体自动化' }, slug: 'docs/agent-automation' },
             { label: 'Session state and restore', translations: { ja: 'セッション状態と復元', 'zh-CN': '会话状态与恢复' }, slug: 'docs/session-state' },
             { label: 'Persistence and remote access', translations: { ja: '永続化とリモートアクセス', 'zh-CN': '持久化与远程访问' }, slug: 'docs/persistence-remote' },
-            { label: 'Configuration', translations: { ja: '設定', 'zh-CN': '配置' }, slug: 'docs/configuration' },
           ],
         },
         {
-          label: 'Plugins',
-          translations: { ja: 'プラグイン', 'zh-CN': '插件' },
+          label: 'Configure',
+          translations: { ja: '設定する', 'zh-CN': '配置' },
           items: [
+            { label: 'Configuration', translations: { ja: '設定', 'zh-CN': '配置指南' }, slug: 'docs/configuration' },
+            { label: 'Config reference', translations: { ja: '設定リファレンス', 'zh-CN': '配置参考' }, slug: 'docs/config-reference' },
             { label: 'Plugins', translations: { ja: 'プラグイン', 'zh-CN': '插件' }, slug: 'docs/plugins' },
             { label: 'Marketplace', translations: { ja: 'マーケットプレイス', 'zh-CN': '插件市场' }, slug: 'docs/marketplace' },
           ],
@@ -182,9 +213,10 @@ export default defineConfig({
           ],
         },
         {
-          label: 'Updates',
-          translations: { ja: '更新情報', 'zh-CN': '更新' },
+          label: 'Help',
+          translations: { ja: 'ヘルプ', 'zh-CN': '帮助' },
           items: [
+            { label: 'Troubleshooting', translations: { ja: 'トラブルシューティング', 'zh-CN': '故障排除' }, slug: 'docs/troubleshooting' },
             { label: 'Preview docs', translations: { ja: 'プレビュー版ドキュメント', 'zh-CN': '预览版文档' }, slug: 'docs/preview' },
           ],
         },
