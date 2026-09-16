@@ -74,6 +74,13 @@ pub enum Dirty {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalCompressionResult {
+    Unsupported,
+    Pending,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowSelection {
     pub start_x: u16,
     pub end_x: u16,
@@ -168,6 +175,8 @@ pub const MOUSE_BUTTON_WHEEL_RIGHT: ffi::GhosttyMouseButton =
     ffi::GhosttyMouseButton_GHOSTTY_MOUSE_BUTTON_SEVEN;
 pub const MOUSE_FORMAT_SGR: ffi::GhosttyMouseFormat =
     ffi::GhosttyMouseFormat_GHOSTTY_MOUSE_FORMAT_SGR;
+pub const MOUSE_FORMAT_SGR_PIXELS: ffi::GhosttyMouseFormat =
+    ffi::GhosttyMouseFormat_GHOSTTY_MOUSE_FORMAT_SGR_PIXELS;
 
 pub const MODE_APPLICATION_CURSOR_KEYS: u16 = 1;
 pub const MODE_FOCUS_EVENT: u16 = 1004;
@@ -470,10 +479,20 @@ const MAX_CLIPBOARD_BYTES: usize = 192 * 1024;
 #[derive(Default)]
 struct TerminalCallbackState {
     write_pty: Option<Box<WritePtyCallback>>,
+    bell_count: u16,
     pwd_changes: Vec<Vec<u8>>,
     clipboard_writes: Vec<Vec<u8>>,
     size_report: ffi::GhosttySizeReportSize,
     color_scheme: Option<ColorScheme>,
+}
+
+unsafe extern "C" fn bell_trampoline(_terminal: ffi::GhosttyTerminal, userdata: *mut c_void) {
+    if userdata.is_null() {
+        return;
+    }
+    // SAFETY: userdata is the TerminalCallbackState installed with this terminal.
+    let state = unsafe { &mut *userdata.cast::<TerminalCallbackState>() };
+    state.bell_count = state.bell_count.saturating_add(1);
 }
 
 unsafe extern "C" fn color_scheme_trampoline(
@@ -768,6 +787,9 @@ pub fn encode_focus(event: FocusEvent) -> Result<Vec<u8>, Error> {
 
 pub struct Terminal {
     raw: ffi::GhosttyTerminal,
+    max_scrollback: usize,
+    #[cfg(windows)]
+    tracked_row: ffi::GhosttyTrackedGridRef,
     callback_state: Box<TerminalCallbackState>,
     kitty_fingerprints: Mutex<HashMap<u32, KittyImageFingerprintEntry>>,
     kitty_empty_generation: Cell<Option<u64>>,
@@ -788,6 +810,9 @@ impl Terminal {
 
         let mut terminal = Self {
             raw,
+            max_scrollback,
+            #[cfg(windows)]
+            tracked_row: ptr::null_mut(),
             callback_state: Box::new(TerminalCallbackState {
                 size_report: ffi::GhosttySizeReportSize {
                     rows,
@@ -812,6 +837,12 @@ impl Terminal {
                 terminal.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_SIZE,
                 (size_trampoline as *const ()).cast(),
+            )
+            .into_result()?;
+            ffi::ghostty_terminal_set(
+                terminal.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_BELL,
+                (bell_trampoline as *const ()).cast(),
             )
             .into_result()?;
             ffi::ghostty_terminal_set(
@@ -849,6 +880,41 @@ impl Terminal {
         }
     }
 
+    pub(crate) fn compression_activity(&self) -> Result<u64, Error> {
+        let mut activity = 0;
+        // SAFETY: self.raw is a live terminal handle and activity is a valid out pointer.
+        unsafe {
+            ffi::ghostty_terminal_compression_activity(self.raw, &mut activity).into_result()?;
+        }
+        Ok(activity)
+    }
+
+    pub(crate) fn compress_incremental(&mut self) -> Result<TerminalCompressionResult, Error> {
+        let mut result =
+            ffi::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED;
+        // SAFETY: self.raw is a live terminal handle and result is a valid out pointer.
+        unsafe {
+            ffi::ghostty_terminal_compress(
+                self.raw,
+                ffi::GhosttyTerminalCompressionMode_GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL,
+                &mut result,
+            )
+            .into_result()?;
+        }
+        match result {
+            ffi::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED => {
+                Ok(TerminalCompressionResult::Unsupported)
+            }
+            ffi::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING => {
+                Ok(TerminalCompressionResult::Pending)
+            }
+            ffi::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_COMPLETE => {
+                Ok(TerminalCompressionResult::Complete)
+            }
+            _ => Err(Error(ffi::GhosttyResult_GHOSTTY_INVALID_VALUE)),
+        }
+    }
+
     pub fn set_default_palette(&mut self, palette: &[RgbColor; 256]) -> Result<(), Error> {
         let palette = palette.map(|color| ffi::GhosttyColorRgb {
             r: color.r,
@@ -863,6 +929,21 @@ impl Terminal {
             )
             .into_result()
         }
+    }
+
+    pub fn default_palette(&self) -> Result<[RgbColor; 256], Error> {
+        let mut out = [ffi::GhosttyColorRgb::default(); 256];
+        // SAFETY: self.raw is a live terminal handle, and out is exactly the
+        // 256-entry array this data kind writes.
+        unsafe {
+            ffi::ghostty_terminal_get(
+                self.raw,
+                ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT,
+                out.as_mut_ptr().cast(),
+            )
+            .into_result()?;
+        }
+        Ok(out.map(Into::into))
     }
 
     pub fn resize(
@@ -958,6 +1039,10 @@ impl Terminal {
         mem::replace(&mut self.callback_state.color_scheme, color_scheme)
     }
 
+    pub fn take_bell_count(&mut self) -> u16 {
+        mem::take(&mut self.callback_state.bell_count)
+    }
+
     pub fn take_pwd_changes(&mut self) -> Vec<Vec<u8>> {
         mem::take(&mut self.callback_state.pwd_changes)
     }
@@ -993,6 +1078,10 @@ impl Terminal {
         self.get_bool(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING)
     }
 
+    pub fn modify_other_keys_enabled(&self) -> Result<bool, Error> {
+        self.get_bool(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_MODIFY_OTHER_KEYS)
+    }
+
     pub fn active_screen(&self) -> Result<ActiveScreen, Error> {
         let mut out = ffi::GhosttyTerminalScreen_GHOSTTY_TERMINAL_SCREEN_PRIMARY;
         unsafe {
@@ -1018,6 +1107,10 @@ impl Terminal {
         self.get_usize(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS)
     }
 
+    pub fn max_scrollback(&self) -> usize {
+        self.max_scrollback
+    }
+
     pub fn scrollbar(&self) -> Result<TerminalScrollbar, Error> {
         let mut out = ffi::GhosttyTerminalScrollbar::default();
         unsafe {
@@ -1033,6 +1126,22 @@ impl Terminal {
             offset: out.offset as usize,
             len: out.len as usize,
         })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn track_row(&mut self, y: u32) -> Option<usize> {
+        let mut point = ffi::GhosttyPointCoordinate::default();
+        let tag = ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN;
+        let result =
+            unsafe { ffi::ghostty_tracked_grid_ref_point(self.tracked_row, tag, &mut point) };
+        let terminal = self.raw;
+        let target = ghostty_viewport_point(0, y);
+        unsafe {
+            ffi::ghostty_tracked_grid_ref_free(self.tracked_row);
+            self.tracked_row = ptr::null_mut();
+            let _ = ffi::ghostty_terminal_grid_ref_track(terminal, target, &mut self.tracked_row);
+        }
+        (result == ffi::GhosttyResult_GHOSTTY_SUCCESS).then_some(point.y as usize)
     }
 
     pub fn screen_cell(&self, x: u16, y: u32) -> Result<(CellWide, Vec<u32>), Error> {
@@ -1347,6 +1456,10 @@ impl Terminal {
         self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS)
     }
 
+    pub fn cursor_y(&self) -> Result<u16, Error> {
+        self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_Y)
+    }
+
     pub fn effective_foreground_color(&self) -> Result<Option<RgbColor>, Error> {
         self.get_optional_rgb_color(TERMINAL_DATA_COLOR_FOREGROUND)
     }
@@ -1355,11 +1468,11 @@ impl Terminal {
         self.get_optional_rgb_color(TERMINAL_DATA_COLOR_CURSOR)
     }
 
-    fn width_px(&self) -> Result<u32, Error> {
+    pub(crate) fn width_px(&self) -> Result<u32, Error> {
         self.get_u32(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_WIDTH_PX)
     }
 
-    fn height_px(&self) -> Result<u32, Error> {
+    pub(crate) fn height_px(&self) -> Result<u32, Error> {
         self.get_u32(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_HEIGHT_PX)
     }
 
@@ -1442,6 +1555,11 @@ impl Terminal {
             graphics,
             ffi::GhosttyKittyGraphicsData_GHOSTTY_KITTY_GRAPHICS_DATA_GENERATION,
         )
+    }
+
+    pub(crate) fn kitty_graphics_may_have_placements(&self) -> Result<bool, Error> {
+        let generation = self.kitty_graphics_generation()?;
+        Ok(generation != 0 && self.kitty_empty_generation.get() != Some(generation))
     }
 
     pub fn kitty_image_placements(&self) -> Result<Vec<KittyImagePlacement>, Error> {
@@ -1819,6 +1937,8 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         // SAFETY: freeing a null or live handle is allowed by the C API.
         unsafe {
+            #[cfg(windows)]
+            ffi::ghostty_tracked_grid_ref_free(self.tracked_row);
             ffi::ghostty_terminal_free(self.raw);
         }
     }
@@ -3233,6 +3353,38 @@ mod tests {
     }
 
     #[test]
+    fn incremental_compression_preserves_cold_scrollback() {
+        let mut terminal = Terminal::new(80, 24, 20_000_000).unwrap();
+        let initial_activity = terminal.compression_activity().unwrap();
+        let suffix = "x".repeat(66);
+        for line in 1..=10_000 {
+            terminal.write(format!("{line:05} {suffix}\r\n").as_bytes());
+        }
+        assert_ne!(terminal.compression_activity().unwrap(), initial_activity);
+
+        let mut complete = false;
+        for _ in 0..10_000 {
+            match terminal.compress_incremental().unwrap() {
+                TerminalCompressionResult::Unsupported => return,
+                TerminalCompressionResult::Pending => {}
+                TerminalCompressionResult::Complete => {
+                    complete = true;
+                    break;
+                }
+            }
+        }
+        assert!(complete, "incremental compression did not converge");
+
+        let oldest = terminal.read_text_screen((0, 0), (79, 0), false).unwrap();
+        assert!(oldest.starts_with("00001 "));
+        let last_row = terminal.total_rows().unwrap() as u32 - 1;
+        let newest = terminal
+            .read_text_screen((0, last_row - 1), (79, last_row), false)
+            .unwrap();
+        assert!(newest.contains("10000"));
+    }
+
+    #[test]
     fn kitty_image_fingerprint_covers_full_payload() {
         let mut data = vec![1u8; 4096 * 4];
         let original =
@@ -3301,13 +3453,16 @@ mod tests {
         terminal.resize(10, 5, 8, 16).unwrap();
 
         assert_eq!(terminal.kitty_graphics_generation().unwrap(), 0);
+        assert!(!terminal.kitty_graphics_may_have_placements().unwrap());
         assert!(terminal.kitty_image_placements().unwrap().is_empty());
 
         terminal.write(b"\x1b_Ga=t,t=d,f=24,i=1,s=1,v=2;////////\x1b\\");
         let transmitted = terminal.kitty_graphics_generation().unwrap();
         assert_ne!(transmitted, 0);
+        assert!(terminal.kitty_graphics_may_have_placements().unwrap());
         assert!(terminal.kitty_image_placements().unwrap().is_empty());
         assert_eq!(terminal.kitty_empty_generation.get(), Some(transmitted));
+        assert!(!terminal.kitty_graphics_may_have_placements().unwrap());
 
         terminal.write(b"plain text");
         assert_eq!(terminal.kitty_graphics_generation().unwrap(), transmitted);
@@ -3316,6 +3471,7 @@ mod tests {
         terminal.write(b"\x1b_Ga=p,i=1,p=1,c=1,r=1;\x1b\\");
         let placed = terminal.kitty_graphics_generation().unwrap();
         assert_ne!(placed, transmitted);
+        assert!(terminal.kitty_graphics_may_have_placements().unwrap());
         assert_eq!(terminal.kitty_image_placements().unwrap().len(), 1);
 
         terminal.resize(10, 5, 12, 24).unwrap();
@@ -3326,14 +3482,17 @@ mod tests {
         assert_eq!(terminal.kitty_graphics_generation().unwrap(), placed);
         assert!(terminal.kitty_image_placements().unwrap().is_empty());
         assert_ne!(terminal.kitty_empty_generation.get(), Some(placed));
+        assert!(terminal.kitty_graphics_may_have_placements().unwrap());
         terminal.scroll_viewport_row(0);
         assert_eq!(terminal.kitty_image_placements().unwrap().len(), 1);
 
         terminal.write(b"\x1b_Ga=d,d=A\x1b\\");
         let deleted = terminal.kitty_graphics_generation().unwrap();
         assert_ne!(deleted, placed);
+        assert!(terminal.kitty_graphics_may_have_placements().unwrap());
         assert!(terminal.kitty_image_placements().unwrap().is_empty());
         assert_eq!(terminal.kitty_empty_generation.get(), Some(deleted));
+        assert!(!terminal.kitty_graphics_may_have_placements().unwrap());
     }
 
     #[test]
@@ -3421,6 +3580,43 @@ mod tests {
         assert_eq!(placements[0].data, [255, 0, 0, 255]);
         assert_eq!(placements[0].render.grid_cols, 10);
         assert_eq!(placements[0].render.grid_rows, 5);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kitty_graphics_file_upload_can_be_placed_later() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-kitty-file-upload-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pixel.rgba");
+        std::fs::write(&path, [255, 0, 0, 255]).unwrap();
+
+        let mut terminal = Terminal::new(10, 5, 0).unwrap();
+        terminal.enable_kitty_graphics().unwrap();
+        terminal.resize(10, 5, 8, 16).unwrap();
+        let mut upload = Vec::new();
+        crate::kitty_graphics::encode_kitty_regular_file(
+            &mut upload,
+            &[],
+            "a=t,f=32,s=1,v=1,i=10,q=0",
+            path.to_str().unwrap(),
+        );
+        terminal.write(&upload);
+        assert!(terminal.kitty_image_placements().unwrap().is_empty());
+
+        terminal.write(b"\x1b_Ga=p,i=10,p=5,c=10,r=5,C=1,q=2\x1b\\");
+        let placements = terminal.kitty_image_placements().unwrap();
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].image_id, 10);
+        assert_eq!(placements[0].placement_id, 5);
+        assert_eq!(placements[0].image_width, 1);
+        assert_eq!(placements[0].image_height, 1);
+        assert_eq!(placements[0].format, KittyImageFormat::Rgba);
+        assert_eq!(placements[0].data, [255, 0, 0, 255]);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -3533,6 +3729,17 @@ mod tests {
         mouse_event.set_position(0.0, 0.0);
         let encoded_mouse = mouse_encoder.encode(&mouse_event).unwrap();
         assert_eq!(encoded_mouse, b"\x1b[<0;1;1M");
+    }
+
+    #[test]
+    fn modify_other_keys_query_tracks_mode_two() {
+        let mut terminal = Terminal::new(80, 24, 0).unwrap();
+
+        assert!(!terminal.modify_other_keys_enabled().unwrap());
+        terminal.write(b"\x1b[>4;2m");
+        assert!(terminal.modify_other_keys_enabled().unwrap());
+        terminal.write(b"\x1b[>4;0m");
+        assert!(!terminal.modify_other_keys_enabled().unwrap());
     }
 
     #[test]
