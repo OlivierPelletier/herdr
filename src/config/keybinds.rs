@@ -91,14 +91,20 @@ impl BindingConfig {
             }
             match parse_binding_string(raw) {
                 Some(ParsedBinding::Single(binding)) => {
-                    if matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9')) {
+                    if matches!(
+                        binding.trigger.combo().0,
+                        KeyCode::Char('1'..='9') | KeyCode::F(1..=12)
+                    ) {
                         labels.push(binding.label);
                     }
                 }
                 Some(ParsedBinding::Range(range)) => {
                     labels.extend(range.into_iter().filter_map(|binding| {
-                        matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9'))
-                            .then_some(binding.label)
+                        matches!(
+                            binding.trigger.combo().0,
+                            KeyCode::Char('1'..='9') | KeyCode::F(1..=12)
+                        )
+                        .then_some(binding.label)
                     }));
                 }
                 None => {}
@@ -311,16 +317,18 @@ impl IndexedKeybind {
     pub fn matched_index(&self, key: &TerminalKey) -> Option<usize> {
         let combo = self.trigger.combo();
         let (expected_code, _) = normalize_key_combo(combo);
-        let KeyCode::Char(key_number @ '1'..='9') = expected_code else {
-            return None;
-        };
-        let legacy_shifted_number = matches!(key.code, KeyCode::Char(c)
-            if shifted_number_symbol(c) == Some(key_number)
-                && indexed_shifted_number_matches(key, combo, key_number));
-        if terminal_key_matches_combo(key, combo) || legacy_shifted_number {
-            Some((key_number as usize) - ('1' as usize))
-        } else {
-            None
+        match expected_code {
+            KeyCode::Char(key_number @ '1'..='9') => {
+                let legacy_shifted_number = matches!(key.code, KeyCode::Char(c)
+                    if shifted_number_symbol(c) == Some(key_number)
+                        && indexed_shifted_number_matches(key, combo, key_number));
+                (terminal_key_matches_combo(key, combo) || legacy_shifted_number)
+                    .then(|| (key_number as usize) - ('1' as usize))
+            }
+            KeyCode::F(n @ 1..=12) => {
+                terminal_key_matches_combo(key, combo).then(|| (n as usize) - 1)
+            }
+            _ => None,
         }
     }
 }
@@ -976,9 +984,12 @@ fn push_indexed_binding(
     source: BindingSource,
     bindings: &mut Vec<IndexedKeybind>,
 ) {
-    if !matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9')) {
+    if !matches!(
+        binding.trigger.combo().0,
+        KeyCode::Char('1'..='9') | KeyCode::F(1..=12)
+    ) {
         let diag = format!(
-            "indexed keybinding must use 1..9: {field} = {:?}; disabling binding",
+            "indexed keybinding must use 1..9 or f1..f12: {field} = {:?}; disabling binding",
             binding.label
         );
         warn!(message = %diag, "config diagnostic");
@@ -1129,6 +1140,28 @@ fn parse_binding_string(raw: &str) -> Option<ParsedBinding> {
         (false, trimmed)
     };
 
+    if let Some((range_modifiers, f_start, f_end)) = parse_fkey_range(body) {
+        let bindings = (f_start..=f_end)
+            .map(|n| {
+                let combo = (KeyCode::F(n), range_modifiers);
+                let key_label = format_key_combo(combo);
+                ResolvedBinding {
+                    trigger: if trigger_prefix {
+                        BindingTrigger::Prefix(combo)
+                    } else {
+                        BindingTrigger::Direct(combo)
+                    },
+                    label: if trigger_prefix {
+                        format!("prefix+{key_label}")
+                    } else {
+                        key_label
+                    },
+                }
+            })
+            .collect();
+        return Some(ParsedBinding::Range(bindings));
+    }
+
     if let Some(range_modifiers) = parse_range_modifiers(body) {
         let bindings = (1..=9)
             .map(|idx| {
@@ -1254,6 +1287,38 @@ fn parse_range_modifiers(s: &str) -> Option<KeyModifiers> {
         }
     }
     saw_range.then_some(modifiers)
+}
+
+fn parse_fkey_range_token(s: &str) -> Option<(u8, u8)> {
+    let (start_str, end_str) = s.split_once("..")?;
+    let start_lower = start_str.to_ascii_lowercase();
+    let end_lower = end_str.to_ascii_lowercase();
+    if !start_lower.starts_with('f') || !end_lower.starts_with('f') {
+        return None;
+    }
+    let start: u8 = start_lower[1..].parse().ok()?;
+    let end: u8 = end_lower[1..].parse().ok()?;
+    if start < 1 || end > 12 || start > end {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn parse_fkey_range(s: &str) -> Option<(KeyModifiers, u8, u8)> {
+    let mut modifiers = KeyModifiers::empty();
+    let mut range: Option<(u8, u8)> = None;
+    for part in s.split('+') {
+        let trimmed = part.trim();
+        if let Some((start, end)) = parse_fkey_range_token(trimmed) {
+            if range.is_some() {
+                return None;
+            }
+            range = Some((start, end));
+        } else {
+            modifiers |= parse_modifier_token(trimmed)?;
+        }
+    }
+    range.map(|(start, end)| (modifiers, start, end))
 }
 
 fn parse_modifier_combo(s: &str) -> Option<KeyModifiers> {
@@ -1626,6 +1691,67 @@ prefix = "ö"
             parse_key_combo("shift+tab"),
             Some((KeyCode::BackTab, KeyModifiers::empty()))
         );
+    }
+
+    #[test]
+    fn parse_fkey_range_basic() {
+        assert_eq!(
+            parse_fkey_range("f1..f12"),
+            Some((KeyModifiers::empty(), 1, 12))
+        );
+    }
+
+    #[test]
+    fn parse_fkey_range_with_modifier() {
+        assert_eq!(
+            parse_fkey_range("alt+f1..f12"),
+            Some((KeyModifiers::ALT, 1, 12))
+        );
+        assert_eq!(
+            parse_fkey_range("ctrl+f1..f8"),
+            Some((KeyModifiers::CONTROL, 1, 8))
+        );
+    }
+
+    #[test]
+    fn parse_fkey_range_partial() {
+        assert_eq!(
+            parse_fkey_range("f10..f12"),
+            Some((KeyModifiers::empty(), 10, 12))
+        );
+    }
+
+    #[test]
+    fn parse_fkey_range_rejects_invalid() {
+        assert_eq!(parse_fkey_range("f13..f20"), None);
+        assert_eq!(parse_fkey_range("f0..f5"), None);
+        assert_eq!(parse_fkey_range("f5..f3"), None);
+        assert_eq!(parse_fkey_range("f1..f13"), None);
+        assert_eq!(parse_fkey_range("not-a-range"), None);
+    }
+
+    #[test]
+    fn parse_fkey_range_case_insensitive() {
+        assert_eq!(
+            parse_fkey_range("F1..F12"),
+            Some((KeyModifiers::empty(), 1, 12))
+        );
+        assert_eq!(
+            parse_fkey_range("ctrl+F1..F5"),
+            Some((KeyModifiers::CONTROL, 1, 5))
+        );
+    }
+
+    #[test]
+    fn parse_fkey_range_token_basic() {
+        assert_eq!(parse_fkey_range_token("f1..f12"), Some((1, 12)));
+        assert_eq!(parse_fkey_range_token("f3..f7"), Some((3, 7)));
+    }
+
+    #[test]
+    fn parse_fkey_range_token_rejects_non_fkey() {
+        assert_eq!(parse_fkey_range_token("1..9"), None);
+        assert_eq!(parse_fkey_range_token("a..z"), None);
     }
 
     #[test]
@@ -2293,6 +2419,180 @@ switch_workspace = "prefix+shift+1..9"
     }
 
     #[test]
+    fn fkey_range_switch_tab_generates_12_direct_bindings() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+switch_tab = "f1..f12"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert_eq!(kb.switch_tab.len(), 12);
+        assert_eq!(
+            kb.switch_tab[0].trigger,
+            BindingTrigger::Direct((KeyCode::F(1), KeyModifiers::empty()))
+        );
+        assert_eq!(kb.switch_tab[0].label, "f1");
+        assert_eq!(
+            kb.switch_tab[11].trigger,
+            BindingTrigger::Direct((KeyCode::F(12), KeyModifiers::empty()))
+        );
+        assert_eq!(kb.switch_tab[11].label, "f12");
+    }
+
+    #[test]
+    fn fkey_range_switch_tab_with_prefix() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+switch_tab = "prefix+f1..f12"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert_eq!(kb.switch_tab.len(), 12);
+        assert_eq!(
+            kb.switch_tab[0].trigger,
+            BindingTrigger::Prefix((KeyCode::F(1), KeyModifiers::empty()))
+        );
+        assert_eq!(kb.switch_tab[0].label, "prefix+f1");
+        assert!(kb.switch_tab.iter().all(|b| b.trigger.is_prefix()));
+    }
+
+    #[test]
+    fn fkey_range_with_modifier() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+switch_workspace = "alt+f1..f12"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert_eq!(kb.switch_workspace.len(), 12);
+        assert_eq!(
+            kb.switch_workspace[0].trigger,
+            BindingTrigger::Direct((KeyCode::F(1), KeyModifiers::ALT))
+        );
+        assert_eq!(kb.switch_workspace[0].label, "alt+f1");
+    }
+
+    #[test]
+    fn fkey_range_partial_supports_subset() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+switch_tab = "prefix+f10..f12"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert_eq!(kb.switch_tab.len(), 3);
+        assert_eq!(
+            kb.switch_tab[0].trigger,
+            BindingTrigger::Prefix((KeyCode::F(10), KeyModifiers::empty()))
+        );
+        assert_eq!(kb.switch_tab[0].label, "prefix+f10");
+    }
+
+    #[test]
+    fn fkey_range_mixed_with_digit_range() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+switch_tab = ["prefix+1..9", "prefix+f10..f12"]
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert_eq!(kb.switch_tab.len(), 12);
+        assert_eq!(
+            kb.switch_tab[0].trigger,
+            BindingTrigger::Prefix((KeyCode::Char('1'), KeyModifiers::empty()))
+        );
+        assert_eq!(
+            kb.switch_tab[9].trigger,
+            BindingTrigger::Prefix((KeyCode::F(10), KeyModifiers::empty()))
+        );
+    }
+
+    #[test]
+    fn indexed_labels_includes_fkey_range() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+switch_tab = ["prefix+1..9", "prefix+f10..f12"]
+"#,
+        )
+        .unwrap();
+        let labels = config.keys.switch_tab.indexed_labels();
+        assert_eq!(labels.len(), 12);
+        assert!(labels.contains(&"prefix+1".to_string()));
+        assert!(labels.contains(&"prefix+f12".to_string()));
+    }
+
+    #[test]
+    fn matched_index_fkey_returns_correct_index() {
+        let binding = IndexedKeybind {
+            trigger: BindingTrigger::Direct((KeyCode::F(3), KeyModifiers::empty())),
+            label: "f3".into(),
+        };
+        assert_eq!(
+            binding.matched_index(&TerminalKey::from(KeyEvent::new(
+                KeyCode::F(3),
+                KeyModifiers::empty()
+            ))),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn matched_index_fkey_rejects_wrong_modifier() {
+        let binding = IndexedKeybind {
+            trigger: BindingTrigger::Direct((KeyCode::F(3), KeyModifiers::ALT)),
+            label: "alt+f3".into(),
+        };
+        assert_eq!(
+            binding.matched_index(&TerminalKey::from(KeyEvent::new(
+                KeyCode::F(3),
+                KeyModifiers::empty()
+            ))),
+            None
+        );
+    }
+
+    #[test]
+    fn matched_index_fkey_rejects_out_of_range() {
+        let binding = IndexedKeybind {
+            trigger: BindingTrigger::Direct((KeyCode::F(1), KeyModifiers::empty())),
+            label: "f1".into(),
+        };
+        assert_eq!(
+            binding.matched_index(&TerminalKey::from(KeyEvent::new(
+                KeyCode::F(13),
+                KeyModifiers::empty()
+            ))),
+            None
+        );
+    }
+
+    #[test]
+    fn matched_index_fkey_rejects_non_fkey() {
+        let binding = IndexedKeybind {
+            trigger: BindingTrigger::Direct((KeyCode::F(1), KeyModifiers::empty())),
+            label: "f1".into(),
+        };
+        assert_eq!(
+            binding.matched_index(&TerminalKey::from(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::empty()
+            ))),
+            None
+        );
+    }
+
+    #[test]
     fn legacy_indexed_user_bindings_displace_modern_defaults() {
         let config: Config = toml::from_str(
             r#"
@@ -2355,10 +2655,31 @@ switch_tab = "prefix+?"
             ))]
         );
         assert!(diagnostics.iter().any(|diag| {
-            diag.contains("indexed keybinding must use 1..9") && diag.contains("keys.switch_tab")
+            diag.contains("indexed keybinding must use 1..9 or f1..f12")
+                && diag.contains("keys.switch_tab")
         }));
         assert!(!diagnostics.iter().any(|diag| {
             diag.contains("kept keys.switch_tab") && diag.contains("disabled keys.help")
+        }));
+    }
+
+    #[test]
+    fn fkey_range_rejected_on_non_indexed_action() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+help = "f1..f12"
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = config.collect_diagnostics();
+        let kb = config.keybinds();
+
+        assert!(kb.help.bindings.is_empty());
+        assert!(diagnostics.iter().any(|diag| {
+            diag.contains("range keybinding is only valid for indexed actions")
+                && diag.contains("keys.help")
         }));
     }
 

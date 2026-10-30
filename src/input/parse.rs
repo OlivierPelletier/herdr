@@ -748,6 +748,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_ghostty_modified_f3_tilde_form() {
+        assert_terminal_key_eq(
+            parse_terminal_key_sequence("\x1b[13;129~").expect("f3 press should parse"),
+            KeyCode::F(3),
+            KeyModifiers::empty(),
+            crossterm::event::KeyEventKind::Press,
+            None,
+        );
+        assert_terminal_key_eq(
+            parse_terminal_key_sequence("\x1b[13;129:3~").expect("f3 release should parse"),
+            KeyCode::F(3),
+            KeyModifiers::empty(),
+            crossterm::event::KeyEventKind::Release,
+            None,
+        );
+        assert_terminal_key_eq(
+            parse_terminal_key_sequence("\x1b[13;2~").expect("shift+f3 should parse"),
+            KeyCode::F(3),
+            KeyModifiers::SHIFT,
+            crossterm::event::KeyEventKind::Press,
+            None,
+        );
+    }
+
+    #[test]
     fn parse_kitty_sequence_preserves_shifted_symbol_pair() {
         let key = parse_terminal_key_sequence("\x1b[49:33;2:1u").unwrap();
         assert_eq!(key.code, KeyCode::Char('1'));

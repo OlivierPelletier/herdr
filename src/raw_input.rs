@@ -2114,6 +2114,7 @@ mod tests {
             (b"\x1b[57366;2u", KeyCode::F(3), KeyModifiers::SHIFT),
             (b"\x1b[57375;1u", KeyCode::F(12), KeyModifiers::empty()),
             (b"\x1b[57376;1u", KeyCode::F(13), KeyModifiers::empty()),
+            (b"\x1b[13;129~", KeyCode::F(3), KeyModifiers::empty()),
             (b"\x1b[49:33;2:1u", KeyCode::Char('1'), KeyModifiers::SHIFT),
         ];
 
